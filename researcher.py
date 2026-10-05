@@ -1,28 +1,23 @@
 """
 Brad's Signals Researcher
-Stage R3 - Multi-Horizon Historical Research Engine
+Stage R3.2 - Hardened Multi-Horizon Research Engine
 
-Purpose:
-- Read Bot 2.0 historical observations
-- Analyse outcome accuracy across multiple time horizons
-- Analyse LONG and SHORT separately
-- Analyse confidence calibration
-- Analyse AI-covered observations separately
-- Detect paired LONG/SHORT research observations
-- Remain completely read-only
+READ ONLY research service for Brad's Signals Bot 2.0.
 
-NO:
-- Database writes
-- Telegram sending
-- Trade execution
-- Production modification
+Safety:
+- No database writes
+- No Telegram
+- No trades
+- No production modification
 """
 
 import os
+import traceback
+
 import psycopg2
 
 
-RESEARCHER_VERSION = "R3.1-MULTI-HORIZON"
+RESEARCHER_VERSION = "R3.2-HARDENED"
 
 DATABASE_WRITES_ENABLED = False
 TELEGRAM_SENDING_ENABLED = False
@@ -80,6 +75,32 @@ def safety_check():
         )
 
     print("SAFETY CHECK: PASS", flush=True)
+
+
+def run_section(name, function, cur):
+    try:
+        function(cur)
+
+        print(
+            f"SECTION STATUS: {name} = PASS",
+            flush=True,
+        )
+
+        return True
+
+    except Exception as exc:
+        print(
+            f"SECTION STATUS: {name} = FAILED",
+            flush=True,
+        )
+
+        print(
+            f"SECTION ERROR: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+        return False
 
 
 def dataset_summary(cur):
@@ -255,10 +276,10 @@ def confidence_calibration(cur):
 
 
 def directional_confidence(cur):
-    section("R3 DIRECTIONAL CONFIDENCE CALIBRATION")
+    section(
+        "R3 DIRECTIONAL CONFIDENCE CALIBRATION"
+    )
 
-    # Concentrate this section on the more useful
-    # medium/longer research horizons.
     selected_horizons = [
         ("30m", "direction_correct_30m"),
         ("1h", "direction_correct_1h"),
@@ -275,7 +296,11 @@ def directional_confidence(cur):
 
         for horizon_label, column in selected_horizons:
 
-            for band_label, lower, upper in CONFIDENCE_BANDS:
+            for (
+                band_label,
+                lower,
+                upper,
+            ) in CONFIDENCE_BANDS:
 
                 query = f"""
                     SELECT
@@ -287,7 +312,8 @@ def directional_confidence(cur):
                         )
                     FROM signals2_opportunities o
                     JOIN signals2_outcomes x
-                        ON x.opportunity_id = o.opportunity_id
+                        ON x.opportunity_id =
+                           o.opportunity_id
                     WHERE x.outcome_complete = TRUE
                       AND o.direction = %s
                       AND o.final_confidence >= %s
@@ -338,6 +364,7 @@ def ai_population(cur):
         f"COMPLETED OBSERVATIONS: {total}",
         flush=True,
     )
+
     print(
         f"WITH AI CONFIDENCE: {with_ai}",
         flush=True,
@@ -417,18 +444,23 @@ def component_confidence(cur):
         f"AVG FINAL CONFIDENCE: {final_conf}",
         flush=True,
     )
+
     print(
-        f"AVG TECHNICAL CONFIDENCE: {technical_conf}",
+        f"AVG TECHNICAL CONFIDENCE: "
+        f"{technical_conf}",
         flush=True,
     )
+
     print(
         f"AVG MEMORY CONFIDENCE: {memory_conf}",
         flush=True,
     )
+
     print(
         f"AVG AI CONFIDENCE: {ai_conf}",
         flush=True,
     )
+
     print(
         f"AVG MARKET CONFIDENCE: {market_conf}",
         flush=True,
@@ -472,8 +504,9 @@ def paired_observations(cur):
     )
 
     print(
-        "IMPORTANT: paired LONG/SHORT research observations "
-        "must not be interpreted as independent executed trades.",
+        "IMPORTANT: paired LONG/SHORT research "
+        "observations are not independent "
+        "executed trades.",
         flush=True,
     )
 
@@ -486,37 +519,45 @@ def signal_population(cur):
         SELECT
             COUNT(*) FILTER (
                 WHERE final_confidence >= 80
-            ),
-            COUNT(*) FILTER (
-                WHERE signal_sent = TRUE
-            ),
+            ) AS confidence_80,
             COUNT(*) FILTER (
                 WHERE decision = 'SELECTED'
-            )
+            ) AS selected_count,
+            COUNT(*) FILTER (
+                WHERE signal_sent = TRUE
+            ) AS sent_count
         FROM signals2_opportunities
         """
     )
 
-    confidence_80,
-    sent,
-    selected = cur.fetchone()
+    row = cur.fetchone()
+
+    confidence_80 = row[0]
+    selected_count = row[1]
+    sent_count = row[2]
 
     print(
-        f"80+ CONFIDENCE OBSERVATIONS: {confidence_80}",
-        flush=True,
-    )
-    print(
-        f"SELECTED OBSERVATIONS: {selected}",
-        flush=True,
-    )
-    print(
-        f"SIGNALS MARKED SENT: {sent}",
+        f"80+ CONFIDENCE OBSERVATIONS: "
+        f"{confidence_80}",
         flush=True,
     )
 
     print(
-        "OBSERVATIONS, SELECTED SIGNALS, SENT SIGNALS "
-        "AND EXECUTED TRADES ARE DIFFERENT POPULATIONS.",
+        f"SELECTED OBSERVATIONS: "
+        f"{selected_count}",
+        flush=True,
+    )
+
+    print(
+        f"SIGNALS MARKED SENT: "
+        f"{sent_count}",
+        flush=True,
+    )
+
+    print(
+        "OBSERVATIONS, SELECTED SIGNALS, "
+        "SENT SIGNALS AND EXECUTED TRADES "
+        "ARE DIFFERENT POPULATIONS.",
         flush=True,
     )
 
@@ -540,6 +581,7 @@ def excursion_analysis(cur):
         f"AVG MAX FAVORABLE EXCURSION: {mfe}",
         flush=True,
     )
+
     print(
         f"AVG MAX ADVERSE EXCURSION: {mae}",
         flush=True,
@@ -563,39 +605,102 @@ def run_research(database_url):
             "DATABASE CONNECTION: READY",
             flush=True,
         )
+
         print(
             "DATABASE SESSION: READ ONLY",
             flush=True,
         )
 
+        research_sections = [
+            (
+                "DATASET SUMMARY",
+                dataset_summary,
+            ),
+            (
+                "MULTI-HORIZON PERFORMANCE",
+                multi_horizon_performance,
+            ),
+            (
+                "LONG VS SHORT",
+                direction_performance,
+            ),
+            (
+                "CONFIDENCE CALIBRATION",
+                confidence_calibration,
+            ),
+            (
+                "DIRECTIONAL CONFIDENCE",
+                directional_confidence,
+            ),
+            (
+                "AI POPULATION",
+                ai_population,
+            ),
+            (
+                "COMPONENT CONFIDENCE",
+                component_confidence,
+            ),
+            (
+                "PAIRED OBSERVATIONS",
+                paired_observations,
+            ),
+            (
+                "SIGNAL POPULATION",
+                signal_population,
+            ),
+            (
+                "MFE MAE",
+                excursion_analysis,
+            ),
+        ]
+
+        passed = 0
+        failed = 0
+
         with conn.cursor() as cur:
 
-            dataset_summary(cur)
+            for name, function in research_sections:
 
-            multi_horizon_performance(cur)
+                success = run_section(
+                    name,
+                    function,
+                    cur,
+                )
 
-            direction_performance(cur)
+                if success:
+                    passed += 1
+                else:
+                    failed += 1
 
-            confidence_calibration(cur)
+                    # A failed PostgreSQL statement leaves
+                    # the transaction aborted.
+                    # Roll back before the next read-only
+                    # research section.
+                    conn.rollback()
 
-            directional_confidence(cur)
-
-            ai_population(cur)
-
-            component_confidence(cur)
-
-            paired_observations(cur)
-
-            signal_population(cur)
-
-            excursion_analysis(cur)
-
-        section("R3 RESEARCH COMPLETE")
+        section("R3 RESEARCH SUMMARY")
 
         print(
-            "STATUS: MULTI-HORIZON RESEARCH PASS",
+            f"SECTIONS PASSED: {passed}",
             flush=True,
         )
+
+        print(
+            f"SECTIONS FAILED: {failed}",
+            flush=True,
+        )
+
+        if failed == 0:
+            print(
+                "STATUS: R3.2 FULL RESEARCH PASS",
+                flush=True,
+            )
+        else:
+            print(
+                "STATUS: R3.2 COMPLETED "
+                "WITH SECTION FAILURES",
+                flush=True,
+            )
 
         print(
             "DATABASE REMAINED READ ONLY",
@@ -607,6 +712,22 @@ def run_research(database_url):
             "NO PRODUCTION CHANGES",
             flush=True,
         )
+
+    except Exception as exc:
+
+        print(
+            "RESEARCHER FATAL ERROR",
+            flush=True,
+        )
+
+        print(
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        raise
 
     finally:
 
