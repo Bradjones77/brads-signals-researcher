@@ -1,13 +1,20 @@
 """
 Brad's Signals Researcher
-R4.1 - Sample Distribution Diagnostic
+R4.2 - Pattern Discovery Engine
 
 Purpose:
-- Measure completed research sample distribution
-- Count observations by symbol
-- Count LONG and SHORT observations separately
-- Show how many symbols meet useful sample thresholds
-- Help choose minimum sample sizes for R4 pattern discovery
+- Discover historical patterns in completed observations
+- Analyse LONG and SHORT independently
+- Analyse symbol + direction performance
+- Analyse multiple outcome horizons
+- Analyse confidence within direction
+- Reject tiny sample patterns
+- Rank stronger and weaker historical patterns
+
+IMPORTANT:
+This is discovery only.
+Patterns found here are NOT production recommendations.
+They require later held-out validation.
 
 READ ONLY.
 
@@ -18,11 +25,13 @@ NO:
 - Production modification
 """
 
+import math
 import os
+
 import psycopg2
 
 
-DIAGNOSTIC_VERSION = "R4.1-SAMPLE-DISTRIBUTION"
+VERSION = "R4.2-PATTERN-DISCOVERY"
 
 DATABASE_WRITES_ENABLED = False
 TELEGRAM_SENDING_ENABLED = False
@@ -30,20 +39,41 @@ TRADE_EXECUTION_ENABLED = False
 PRODUCTION_MODIFICATION_ENABLED = False
 
 
-SAMPLE_THRESHOLDS = [
-    10,
-    20,
-    30,
-    50,
-    100,
+MIN_SAMPLE = 50
+
+STRONG_RATE = 55.0
+VERY_STRONG_RATE = 60.0
+
+WEAK_RATE = 45.0
+VERY_WEAK_RATE = 40.0
+
+
+HORIZONS = [
+    ("5m", "direction_correct_5m"),
+    ("30m", "direction_correct_30m"),
+    ("1h", "direction_correct_1h"),
+    ("4h", "direction_correct_4h"),
+    ("12h", "direction_correct_12h"),
+    ("24h", "direction_correct_24h"),
+]
+
+
+CONFIDENCE_BANDS = [
+    ("0-49.99", 0.0, 50.0),
+    ("50-59.99", 50.0, 60.0),
+    ("60-64.99", 60.0, 65.0),
+    ("65-69.99", 65.0, 70.0),
+    ("70-74.99", 70.0, 75.0),
+    ("75-79.99", 75.0, 80.0),
+    ("80+", 80.0, 101.0),
 ]
 
 
 def section(title):
     print("", flush=True)
-    print("=" * 70, flush=True)
+    print("=" * 78, flush=True)
     print(title, flush=True)
-    print("=" * 70, flush=True)
+    print("=" * 78, flush=True)
 
 
 def safety_check():
@@ -54,7 +84,7 @@ def safety_check():
         or PRODUCTION_MODIFICATION_ENABLED
     ):
         raise RuntimeError(
-            "R4.1 SAFETY CHECK FAILED"
+            "R4.2 SAFETY CHECK FAILED"
         )
 
     print(
@@ -63,46 +93,102 @@ def safety_check():
     )
 
 
+def percentage(correct, total):
+    if not total:
+        return 0.0
+
+    return (
+        float(correct)
+        / float(total)
+        * 100.0
+    )
+
+
+def wilson_interval(correct, total, z=1.96):
+    """
+    Approximate 95% Wilson confidence interval.
+
+    Used only as a research stability indicator.
+    It does NOT prove future profitability.
+    """
+
+    if not total:
+        return 0.0, 0.0
+
+    p = float(correct) / float(total)
+
+    denominator = (
+        1.0
+        + (z * z / total)
+    )
+
+    centre = (
+        p
+        + (z * z / (2.0 * total))
+    )
+
+    adjustment = z * math.sqrt(
+        (
+            p * (1.0 - p)
+            + (z * z / (4.0 * total))
+        )
+        / total
+    )
+
+    lower = (
+        centre - adjustment
+    ) / denominator
+
+    upper = (
+        centre + adjustment
+    ) / denominator
+
+    return (
+        lower * 100.0,
+        upper * 100.0,
+    )
+
+
+def classify(rate_value):
+    if rate_value >= VERY_STRONG_RATE:
+        return "VERY_STRONG"
+
+    if rate_value >= STRONG_RATE:
+        return "STRONG"
+
+    if rate_value <= VERY_WEAK_RATE:
+        return "VERY_WEAK"
+
+    if rate_value <= WEAK_RATE:
+        return "WEAK"
+
+    return "NEUTRAL"
+
+
 def dataset_summary(cur):
-    section("R4.1 DATASET SUMMARY")
-
-    cur.execute(
-        """
-        SELECT COUNT(*)
-        FROM signals2_opportunities o
-        JOIN signals2_outcomes x
-            ON x.opportunity_id = o.opportunity_id
-        WHERE x.outcome_complete = TRUE
-        """
-    )
-
-    completed = cur.fetchone()[0]
-
-    cur.execute(
-        """
-        SELECT COUNT(DISTINCT o.symbol)
-        FROM signals2_opportunities o
-        JOIN signals2_outcomes x
-            ON x.opportunity_id = o.opportunity_id
-        WHERE x.outcome_complete = TRUE
-        """
-    )
-
-    symbols = cur.fetchone()[0]
+    section("R4.2 DATASET SUMMARY")
 
     cur.execute(
         """
         SELECT
+            COUNT(*),
+            COUNT(DISTINCT o.symbol),
             MIN(o.created_at),
             MAX(o.created_at)
         FROM signals2_opportunities o
         JOIN signals2_outcomes x
-            ON x.opportunity_id = o.opportunity_id
+            ON x.opportunity_id =
+               o.opportunity_id
         WHERE x.outcome_complete = TRUE
         """
     )
 
-    oldest, newest = cur.fetchone()
+    (
+        completed,
+        symbols,
+        oldest,
+        newest,
+    ) = cur.fetchone()
 
     print(
         f"COMPLETED OBSERVATIONS: {completed}",
@@ -115,330 +201,425 @@ def dataset_summary(cur):
     )
 
     print(
-        f"OLDEST COMPLETED OBSERVATION: {oldest}",
+        f"OLDEST COMPLETED: {oldest}",
         flush=True,
     )
 
     print(
-        f"NEWEST COMPLETED OBSERVATION: {newest}",
-        flush=True,
-    )
-
-
-def symbol_distribution(cur):
-    section("R4.1 COMPLETED OBSERVATIONS BY SYMBOL")
-
-    cur.execute(
-        """
-        SELECT
-            o.symbol,
-            COUNT(*) AS total_count,
-            COUNT(*) FILTER (
-                WHERE o.direction = 'LONG'
-            ) AS long_count,
-            COUNT(*) FILTER (
-                WHERE o.direction = 'SHORT'
-            ) AS short_count
-        FROM signals2_opportunities o
-        JOIN signals2_outcomes x
-            ON x.opportunity_id = o.opportunity_id
-        WHERE x.outcome_complete = TRUE
-        GROUP BY o.symbol
-        ORDER BY
-            total_count DESC,
-            o.symbol ASC
-        """
-    )
-
-    rows = cur.fetchall()
-
-    for (
-        symbol,
-        total_count,
-        long_count,
-        short_count,
-    ) in rows:
-
-        print(
-            f"SYMBOL={symbol} | "
-            f"TOTAL={total_count} | "
-            f"LONG={long_count} | "
-            f"SHORT={short_count}",
-            flush=True,
-        )
-
-    return rows
-
-
-def distribution_statistics(rows):
-    section("R4.1 SAMPLE DISTRIBUTION STATISTICS")
-
-    if not rows:
-        print(
-            "NO COMPLETED SYMBOL DATA",
-            flush=True,
-        )
-        return
-
-    totals = sorted(
-        row[1]
-        for row in rows
-    )
-
-    long_counts = sorted(
-        row[2]
-        for row in rows
-    )
-
-    short_counts = sorted(
-        row[3]
-        for row in rows
-    )
-
-    def median(values):
-        length = len(values)
-
-        if length == 0:
-            return 0
-
-        middle = length // 2
-
-        if length % 2:
-            return values[middle]
-
-        return (
-            values[middle - 1]
-            + values[middle]
-        ) / 2
-
-    print(
-        f"SYMBOLS ANALYSED: {len(rows)}",
+        f"NEWEST COMPLETED: {newest}",
         flush=True,
     )
 
     print(
-        f"MIN TOTAL SAMPLE: {min(totals)}",
-        flush=True,
-    )
-
-    print(
-        f"MEDIAN TOTAL SAMPLE: {median(totals)}",
-        flush=True,
-    )
-
-    print(
-        f"MAX TOTAL SAMPLE: {max(totals)}",
-        flush=True,
-    )
-
-    print(
-        f"MIN LONG SAMPLE: {min(long_counts)}",
-        flush=True,
-    )
-
-    print(
-        f"MEDIAN LONG SAMPLE: {median(long_counts)}",
-        flush=True,
-    )
-
-    print(
-        f"MAX LONG SAMPLE: {max(long_counts)}",
-        flush=True,
-    )
-
-    print(
-        f"MIN SHORT SAMPLE: {min(short_counts)}",
-        flush=True,
-    )
-
-    print(
-        f"MEDIAN SHORT SAMPLE: {median(short_counts)}",
-        flush=True,
-    )
-
-    print(
-        f"MAX SHORT SAMPLE: {max(short_counts)}",
+        f"MINIMUM PATTERN SAMPLE: {MIN_SAMPLE}",
         flush=True,
     )
 
 
-def threshold_analysis(cur):
-    section("R4.1 SAMPLE THRESHOLD ANALYSIS")
-
-    for threshold in SAMPLE_THRESHOLDS:
-
-        cur.execute(
-            """
-            SELECT COUNT(*)
-            FROM (
-                SELECT
-                    o.symbol,
-                    COUNT(*) AS sample_count
-                FROM signals2_opportunities o
-                JOIN signals2_outcomes x
-                    ON x.opportunity_id =
-                       o.opportunity_id
-                WHERE x.outcome_complete = TRUE
-                GROUP BY o.symbol
-                HAVING COUNT(*) >= %s
-            ) samples
-            """,
-            (threshold,),
-        )
-
-        symbols_total = cur.fetchone()[0]
-
-        cur.execute(
-            """
-            SELECT COUNT(*)
-            FROM (
-                SELECT
-                    o.symbol,
-                    o.direction,
-                    COUNT(*) AS sample_count
-                FROM signals2_opportunities o
-                JOIN signals2_outcomes x
-                    ON x.opportunity_id =
-                       o.opportunity_id
-                WHERE x.outcome_complete = TRUE
-                  AND o.direction IN (
-                      'LONG',
-                      'SHORT'
-                  )
-                GROUP BY
-                    o.symbol,
-                    o.direction
-                HAVING COUNT(*) >= %s
-            ) samples
-            """,
-            (threshold,),
-        )
-
-        symbol_directions = cur.fetchone()[0]
-
-        print(
-            f"MIN_SAMPLE={threshold} | "
-            f"SYMBOLS={symbols_total} | "
-            f"SYMBOL_DIRECTION_GROUPS="
-            f"{symbol_directions}",
-            flush=True,
-        )
-
-
-def confidence_distribution(cur):
-    section("R4.1 CONFIDENCE SAMPLE DISTRIBUTION")
-
-    cur.execute(
-        """
-        SELECT
-            CASE
-                WHEN o.final_confidence < 50
-                    THEN '0-49.99'
-                WHEN o.final_confidence < 60
-                    THEN '50-59.99'
-                WHEN o.final_confidence < 65
-                    THEN '60-64.99'
-                WHEN o.final_confidence < 70
-                    THEN '65-69.99'
-                WHEN o.final_confidence < 75
-                    THEN '70-74.99'
-                WHEN o.final_confidence < 80
-                    THEN '75-79.99'
-                ELSE '80+'
-            END AS confidence_band,
-            COUNT(*) AS total_count,
-            COUNT(*) FILTER (
-                WHERE o.direction = 'LONG'
-            ) AS long_count,
-            COUNT(*) FILTER (
-                WHERE o.direction = 'SHORT'
-            ) AS short_count
-        FROM signals2_opportunities o
-        JOIN signals2_outcomes x
-            ON x.opportunity_id = o.opportunity_id
-        WHERE x.outcome_complete = TRUE
-        GROUP BY confidence_band
-        ORDER BY
-            MIN(o.final_confidence)
-        """
+def discover_symbol_direction(cur):
+    section(
+        "R4.2 SYMBOL + DIRECTION PATTERNS"
     )
 
-    rows = cur.fetchall()
+    patterns = []
 
-    for (
-        band,
-        total_count,
-        long_count,
-        short_count,
-    ) in rows:
+    for horizon, column in HORIZONS:
 
-        print(
-            f"CONFIDENCE={band} | "
-            f"TOTAL={total_count} | "
-            f"LONG={long_count} | "
-            f"SHORT={short_count}",
-            flush=True,
-        )
-
-
-def paired_structure(cur):
-    section("R4.1 PAIRED LONG/SHORT STRUCTURE")
-
-    cur.execute(
-        """
-        SELECT
-            COUNT(*)
-        FROM (
+        query = f"""
             SELECT
                 o.symbol,
-                o.created_at
+                o.direction,
+                COUNT(*) AS sample_count,
+                COUNT(*) FILTER (
+                    WHERE x.{column} = TRUE
+                ) AS correct_count
             FROM signals2_opportunities o
             JOIN signals2_outcomes x
                 ON x.opportunity_id =
                    o.opportunity_id
             WHERE x.outcome_complete = TRUE
+              AND x.{column} IS NOT NULL
+              AND o.direction IN (
+                  'LONG',
+                  'SHORT'
+              )
             GROUP BY
                 o.symbol,
-                o.created_at
-            HAVING
-                COUNT(*) FILTER (
-                    WHERE o.direction = 'LONG'
-                ) > 0
-                AND
-                COUNT(*) FILTER (
-                    WHERE o.direction = 'SHORT'
-                ) > 0
-        ) paired
+                o.direction
+            HAVING COUNT(*) >= %s
         """
+
+        cur.execute(
+            query,
+            (MIN_SAMPLE,),
+        )
+
+        for (
+            symbol,
+            direction,
+            sample,
+            correct,
+        ) in cur.fetchall():
+
+            rate_value = percentage(
+                correct,
+                sample,
+            )
+
+            lower, upper = wilson_interval(
+                correct,
+                sample,
+            )
+
+            classification = classify(
+                rate_value
+            )
+
+            patterns.append(
+                {
+                    "type": "SYMBOL_DIRECTION",
+                    "symbol": symbol,
+                    "direction": direction,
+                    "horizon": horizon,
+                    "sample": sample,
+                    "correct": correct,
+                    "rate": rate_value,
+                    "lower": lower,
+                    "upper": upper,
+                    "classification":
+                        classification,
+                }
+            )
+
+    patterns.sort(
+        key=lambda row: (
+            row["rate"],
+            row["sample"],
+        ),
+        reverse=True,
     )
 
-    paired_groups = cur.fetchone()[0]
+    for row in patterns:
+
+        print(
+            f"{row['classification']} | "
+            f"{row['symbol']} | "
+            f"{row['direction']} | "
+            f"HORIZON={row['horizon']} | "
+            f"N={row['sample']} | "
+            f"CORRECT={row['correct']} | "
+            f"RATE={row['rate']:.2f}% | "
+            f"95CI="
+            f"{row['lower']:.2f}-"
+            f"{row['upper']:.2f}%",
+            flush=True,
+        )
+
+    return patterns
+
+
+def discover_direction_confidence(cur):
+    section(
+        "R4.2 DIRECTION + CONFIDENCE PATTERNS"
+    )
+
+    patterns = []
+
+    for direction in (
+        "LONG",
+        "SHORT",
+    ):
+
+        for (
+            band,
+            lower_conf,
+            upper_conf,
+        ) in CONFIDENCE_BANDS:
+
+            for horizon, column in HORIZONS:
+
+                query = f"""
+                    SELECT
+                        COUNT(*) AS sample_count,
+                        COUNT(*) FILTER (
+                            WHERE x.{column} = TRUE
+                        ) AS correct_count
+                    FROM signals2_opportunities o
+                    JOIN signals2_outcomes x
+                        ON x.opportunity_id =
+                           o.opportunity_id
+                    WHERE x.outcome_complete = TRUE
+                      AND x.{column} IS NOT NULL
+                      AND o.direction = %s
+                      AND o.final_confidence >= %s
+                      AND o.final_confidence < %s
+                """
+
+                cur.execute(
+                    query,
+                    (
+                        direction,
+                        lower_conf,
+                        upper_conf,
+                    ),
+                )
+
+                sample, correct = cur.fetchone()
+
+                if sample < MIN_SAMPLE:
+                    continue
+
+                rate_value = percentage(
+                    correct,
+                    sample,
+                )
+
+                ci_lower, ci_upper = (
+                    wilson_interval(
+                        correct,
+                        sample,
+                    )
+                )
+
+                patterns.append(
+                    {
+                        "type":
+                            "DIRECTION_CONFIDENCE",
+                        "direction":
+                            direction,
+                        "band":
+                            band,
+                        "horizon":
+                            horizon,
+                        "sample":
+                            sample,
+                        "correct":
+                            correct,
+                        "rate":
+                            rate_value,
+                        "lower":
+                            ci_lower,
+                        "upper":
+                            ci_upper,
+                        "classification":
+                            classify(rate_value),
+                    }
+                )
+
+    patterns.sort(
+        key=lambda row: (
+            row["rate"],
+            row["sample"],
+        ),
+        reverse=True,
+    )
+
+    for row in patterns:
+
+        print(
+            f"{row['classification']} | "
+            f"{row['direction']} | "
+            f"CONFIDENCE={row['band']} | "
+            f"HORIZON={row['horizon']} | "
+            f"N={row['sample']} | "
+            f"CORRECT={row['correct']} | "
+            f"RATE={row['rate']:.2f}% | "
+            f"95CI="
+            f"{row['lower']:.2f}-"
+            f"{row['upper']:.2f}%",
+            flush=True,
+        )
+
+    return patterns
+
+
+def strongest_candidates(patterns):
+    section(
+        "R4.2 STRONGEST DISCOVERY CANDIDATES"
+    )
+
+    candidates = [
+        row
+        for row in patterns
+        if (
+            row["rate"] >= STRONG_RATE
+            and row["sample"] >= MIN_SAMPLE
+        )
+    ]
+
+    candidates.sort(
+        key=lambda row: (
+            row["lower"],
+            row["rate"],
+            row["sample"],
+        ),
+        reverse=True,
+    )
+
+    if not candidates:
+        print(
+            "NO STRONG CANDIDATES FOUND",
+            flush=True,
+        )
+        return
+
+    for index, row in enumerate(
+        candidates[:20],
+        start=1,
+    ):
+
+        print(
+            f"RANK={index} | "
+            f"{row['symbol']} | "
+            f"{row['direction']} | "
+            f"HORIZON={row['horizon']} | "
+            f"N={row['sample']} | "
+            f"RATE={row['rate']:.2f}% | "
+            f"95CI_LOW={row['lower']:.2f}% | "
+            f"CLASS={row['classification']}",
+            flush=True,
+        )
+
+
+def weakest_candidates(patterns):
+    section(
+        "R4.2 WEAKEST DISCOVERY CANDIDATES"
+    )
+
+    candidates = [
+        row
+        for row in patterns
+        if (
+            row["rate"] <= WEAK_RATE
+            and row["sample"] >= MIN_SAMPLE
+        )
+    ]
+
+    candidates.sort(
+        key=lambda row: (
+            row["upper"],
+            row["rate"],
+        ),
+    )
+
+    if not candidates:
+        print(
+            "NO WEAK CANDIDATES FOUND",
+            flush=True,
+        )
+        return
+
+    for index, row in enumerate(
+        candidates[:20],
+        start=1,
+    ):
+
+        print(
+            f"RANK={index} | "
+            f"{row['symbol']} | "
+            f"{row['direction']} | "
+            f"HORIZON={row['horizon']} | "
+            f"N={row['sample']} | "
+            f"RATE={row['rate']:.2f}% | "
+            f"95CI_HIGH={row['upper']:.2f}% | "
+            f"CLASS={row['classification']}",
+            flush=True,
+        )
+
+
+def pattern_summary(
+    symbol_patterns,
+    confidence_patterns,
+):
+    section("R4.2 PATTERN SUMMARY")
+
+    symbol_strong = sum(
+        1
+        for row in symbol_patterns
+        if row["rate"] >= STRONG_RATE
+    )
+
+    symbol_very_strong = sum(
+        1
+        for row in symbol_patterns
+        if row["rate"] >= VERY_STRONG_RATE
+    )
+
+    symbol_weak = sum(
+        1
+        for row in symbol_patterns
+        if row["rate"] <= WEAK_RATE
+    )
+
+    confidence_strong = sum(
+        1
+        for row in confidence_patterns
+        if row["rate"] >= STRONG_RATE
+    )
+
+    confidence_weak = sum(
+        1
+        for row in confidence_patterns
+        if row["rate"] <= WEAK_RATE
+    )
 
     print(
-        f"PAIRED LONG/SHORT GROUPS: "
-        f"{paired_groups}",
+        f"SYMBOL/DIRECTION PATTERNS: "
+        f"{len(symbol_patterns)}",
         flush=True,
     )
 
     print(
-        "NOTE: paired observations are research "
-        "observations, not independent trades.",
+        f"SYMBOL/DIRECTION >=55%: "
+        f"{symbol_strong}",
+        flush=True,
+    )
+
+    print(
+        f"SYMBOL/DIRECTION >=60%: "
+        f"{symbol_very_strong}",
+        flush=True,
+    )
+
+    print(
+        f"SYMBOL/DIRECTION <=45%: "
+        f"{symbol_weak}",
+        flush=True,
+    )
+
+    print(
+        f"DIRECTION/CONFIDENCE PATTERNS: "
+        f"{len(confidence_patterns)}",
+        flush=True,
+    )
+
+    print(
+        f"DIRECTION/CONFIDENCE >=55%: "
+        f"{confidence_strong}",
+        flush=True,
+    )
+
+    print(
+        f"DIRECTION/CONFIDENCE <=45%: "
+        f"{confidence_weak}",
         flush=True,
     )
 
 
 def main():
-    print("=" * 70, flush=True)
+    print("=" * 78, flush=True)
+
     print(
         "BRADS-SIGNALS-RESEARCHER",
         flush=True,
     )
+
     print(
-        f"DIAGNOSTIC VERSION: "
-        f"{DIAGNOSTIC_VERSION}",
+        f"VERSION: {VERSION}",
         flush=True,
     )
-    print("=" * 70, flush=True)
+
+    print("=" * 78, flush=True)
 
     print(
         f"DATABASE WRITES: "
@@ -503,21 +684,50 @@ def main():
 
             dataset_summary(cur)
 
-            rows = symbol_distribution(cur)
+            symbol_patterns = (
+                discover_symbol_direction(
+                    cur
+                )
+            )
 
-            distribution_statistics(rows)
+            confidence_patterns = (
+                discover_direction_confidence(
+                    cur
+                )
+            )
 
-            threshold_analysis(cur)
+            strongest_candidates(
+                symbol_patterns
+            )
 
-            confidence_distribution(cur)
+            weakest_candidates(
+                symbol_patterns
+            )
 
-            paired_structure(cur)
+            pattern_summary(
+                symbol_patterns,
+                confidence_patterns,
+            )
 
-        section("R4.1 DIAGNOSTIC SUMMARY")
+        section("R4.2 DISCOVERY COMPLETE")
 
         print(
-            "STATUS: R4.1 SAMPLE "
-            "DISTRIBUTION PASS",
+            "STATUS: R4.2 PATTERN "
+            "DISCOVERY PASS",
+            flush=True,
+        )
+
+        print(
+            "IMPORTANT: DISCOVERED PATTERNS "
+            "ARE HYPOTHESES, NOT PRODUCTION "
+            "RULES.",
+            flush=True,
+        )
+
+        print(
+            "NEXT REQUIREMENT: HELD-OUT "
+            "VALIDATION BEFORE ANY PATTERN "
+            "CAN BE CONSIDERED RELIABLE.",
             flush=True,
         )
 
